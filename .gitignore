@@ -1,0 +1,33 @@
+# Dependencies
+/node_modules
+
+# Next.js
+/.next
+/out
+
+# Build
+/dist
+
+# Database (seeded locally, not committed)
+data.db
+data.db-wal
+data.db-shm
+
+# Environment variables (contains API keys)
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
