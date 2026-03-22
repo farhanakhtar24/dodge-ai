@@ -118,7 +118,7 @@ STRICT RULES:
 
   const result = streamText({
     model: MODEL,
-    system: "You are a data analyst. Your ONLY job is to report exactly what the database returned — nothing more. Never estimate, infer, or add information not present in the query results.",
+    system: "You are a data analyst for an SAP Order-to-Cash system. Summarise the database results in clear, natural language. Be concise and data-driven — highlight key numbers, patterns, or notable findings. Never estimate or infer anything not present in the data.",
     prompt: answerPrompt,
     onFinish: ({ text }) => {
       if (sessionId) saveAssistantMessage(sessionId, text, sql, results.length, false);

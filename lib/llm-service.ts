@@ -1,11 +1,7 @@
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { generateText } from "ai";
+import { DEFAULT_MODEL } from "./models";
 
-const google = createGoogleGenerativeAI({
-  apiKey: process.env.GEMINI_API_KEY,
-});
-
-export const MODEL = google("gemini-2.0-flash");
+export const MODEL = DEFAULT_MODEL;
 
 export const SYSTEM_PROMPT = `You are an expert data analyst for an SAP Order-to-Cash system. Answer questions using only data from the database. Be concise and data-driven. At the end of your answer include: {"referencedIds": ["id1","id2"]} listing any entity IDs from the results.`;
 
