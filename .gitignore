@@ -8,8 +8,7 @@
 # Build
 /dist
 
-# Database (seeded locally, not committed)
-data.db
+# SQLite WAL journal files (auto-generated, not needed)
 data.db-wal
 data.db-shm
 

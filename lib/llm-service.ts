@@ -5,19 +5,32 @@ const google = createGoogleGenerativeAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
 
-export const MODEL = google("gemini-3-flash-preview");
+export const MODEL = google("gemini-2.0-flash");
 
 export const SYSTEM_PROMPT = `You are an expert data analyst for an SAP Order-to-Cash system. Answer questions using only data from the database. Be concise and data-driven. At the end of your answer include: {"referencedIds": ["id1","id2"]} listing any entity IDs from the results.`;
 
-const OFF_TOPIC = [
+const OFF_TOPIC_REGEX = [
   /\bpoe[mt]/i, /\blyric/i, /\bsong\b/i,
   /\bhistory\b(?! of (order|invoice|billing|delivery|payment|sales))/i,
   /\bjavascript\b/i, /\bpython\b/i, /\brecipe/i,
   /\bweather/i, /\bsport/i, /\bmovie/i, /\bfilm\b/i, /\bcook/i, /\bjoke\b/i,
 ];
 
-export function isOffTopic(message: string): boolean {
-  return OFF_TOPIC.some((p) => p.test(message));
+export async function isOffTopic(message: string): Promise<boolean> {
+  // Fast path: obvious regex matches
+  if (OFF_TOPIC_REGEX.some((p) => p.test(message))) return true;
+
+  // LLM classification for anything not caught by regex
+  const { text } = await generateText({
+    model: MODEL,
+    system: `You are a query classifier for an SAP Order-to-Cash business data system.
+The system contains: sales orders, deliveries, billing documents, payments, journal entries, customers, products, and plants.
+Reply with exactly one word — YES if the user's question is relevant to this business dataset, NO if it is not.
+Do not explain. Do not add punctuation.`,
+    prompt: message,
+  });
+
+  return text.trim().toUpperCase().startsWith("NO");
 }
 
 // ─── SQL System Prompt ────────────────────────────────────────────────────────

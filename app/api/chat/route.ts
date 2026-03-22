@@ -52,7 +52,7 @@ export async function POST(req: Request) {
   if (sessionId) saveUserMessage(sessionId, lastMessage);
 
   // Guardrail
-  if (isOffTopic(lastMessage)) {
+  if (await isOffTopic(lastMessage)) {
     const result = streamText({
       model: MODEL,
       prompt: "Reply with exactly: This system is designed to answer questions related to the Order-to-Cash dataset only.",
