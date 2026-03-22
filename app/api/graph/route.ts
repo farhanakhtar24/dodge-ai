@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/lib/db";
+import sql from "@/lib/db";
 
 const NODE_COLORS: Record<string, string> = {
   SalesOrder:   "#3B82F6",
@@ -17,23 +17,22 @@ const NODE_COLORS: Record<string, string> = {
   Address:      "#6B7280",
 };
 
+// Note: Postgres lowercases unquoted column names, so idCol/labelCol are lowercase
 const TYPE_TO_TABLE: Record<string, { table: string; idCol: string; labelCol?: string }> = {
-  SalesOrder:   { table: "sales_order_headers",   idCol: "salesOrder" },
-  Delivery:     { table: "outbound_delivery_headers", idCol: "deliveryDocument" },
-  BillingDoc:   { table: "billing_document_headers",  idCol: "billingDocument" },
-  Cancellation: { table: "billing_document_cancellations", idCol: "billingDocument" },
-  JournalEntry: { table: "journal_entry_items",    idCol: "accountingDocument" },
-  Payment:      { table: "payments",               idCol: "accountingDocument" },
-  Customer:     { table: "business_partners",      idCol: "businessPartner", labelCol: "businessPartnerFullName" },
+  SalesOrder:   { table: "sales_order_headers",   idCol: "salesorder" },
+  Delivery:     { table: "outbound_delivery_headers", idCol: "deliverydocument" },
+  BillingDoc:   { table: "billing_document_headers",  idCol: "billingdocument" },
+  Cancellation: { table: "billing_document_cancellations", idCol: "billingdocument" },
+  JournalEntry: { table: "journal_entry_items",    idCol: "accountingdocument" },
+  Payment:      { table: "payments",               idCol: "accountingdocument" },
+  Customer:     { table: "business_partners",      idCol: "businesspartner", labelCol: "businesspartnerfullname" },
   Product:      { table: "products",               idCol: "product" },
-  Plant:        { table: "plants",                 idCol: "plant", labelCol: "plantName" },
+  Plant:        { table: "plants",                 idCol: "plant", labelCol: "plantname" },
 };
 
-// Default types shown (core O2C flow)
 const DEFAULT_TYPES = ["SalesOrder", "Delivery", "BillingDoc", "Payment", "JournalEntry"];
 
 export async function GET(req: NextRequest) {
-  const db = getDb();
   const { searchParams } = new URL(req.url);
   const limit = parseInt(searchParams.get("limit") || "600");
   const typesParam = searchParams.get("types");
@@ -42,12 +41,12 @@ export async function GET(req: NextRequest) {
   const nodes: Record<string, unknown>[] = [];
   const nodeIds = new Set<string>();
 
-  // Load nodes for each active type
   for (const type of activeTypes) {
     const meta = TYPE_TO_TABLE[type];
     if (!meta) continue;
     try {
-      const rows = db.prepare(`SELECT * FROM ${meta.table} LIMIT ?`).all(limit) as Record<string, unknown>[];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rows = await (sql as any)(`SELECT * FROM ${meta.table} LIMIT ${limit}`) as Record<string, unknown>[];
       for (const row of rows) {
         const id = row[meta.idCol] as string;
         if (!id || nodeIds.has(id)) continue;
@@ -65,12 +64,10 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Enforce node limit
   const limitedNodes = nodes.slice(0, limit);
   const limitedIds = new Set(limitedNodes.map((n) => n.id as string));
 
-  // Load edges between included nodes only
-  const edgeRows = db.prepare("SELECT * FROM edges").all() as {
+  const edgeRows = await sql`SELECT * FROM edges` as {
     source_id: string; source_type: string;
     target_id: string; target_type: string;
     relationship_label: string;
@@ -80,7 +77,6 @@ export async function GET(req: NextRequest) {
     .filter((e) => limitedIds.has(e.source_id) && limitedIds.has(e.target_id))
     .map((e) => ({ source: e.source_id, target: e.target_id, label: e.relationship_label }));
 
-  // Compute node degree for sizing
   const degree: Record<string, number> = {};
   for (const link of links) {
     degree[link.source as string] = (degree[link.source as string] || 0) + 1;

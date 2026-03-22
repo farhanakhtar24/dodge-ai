@@ -1,4 +1,4 @@
-import { getDb } from "@/lib/db";
+import sql from "@/lib/db";
 import { NextResponse } from "next/server";
 
 function uid() {
@@ -6,19 +6,13 @@ function uid() {
 }
 
 export async function GET() {
-  const db = getDb();
-  const sessions = db.prepare(
-    "SELECT id, title, created_at, updated_at FROM chat_sessions ORDER BY updated_at DESC"
-  ).all();
+  const sessions = await sql`SELECT id, title, created_at, updated_at FROM chat_sessions ORDER BY updated_at DESC`;
   return NextResponse.json(sessions);
 }
 
 export async function POST(req: Request) {
   const { title } = await req.json().catch(() => ({ title: "New Chat" }));
-  const db = getDb();
   const id = uid();
-  db.prepare(
-    "INSERT INTO chat_sessions (id, title) VALUES (?, ?)"
-  ).run(id, title ?? "New Chat");
+  await sql`INSERT INTO chat_sessions (id, title) VALUES (${id}, ${title ?? "New Chat"})`;
   return NextResponse.json({ id, title: title ?? "New Chat" });
 }

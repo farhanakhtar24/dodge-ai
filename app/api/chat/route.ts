@@ -1,41 +1,39 @@
 import { streamText } from "ai";
-import { getDb } from "@/lib/db";
+import sql from "@/lib/db";
 import { generateSQL, fixSQL, isOffTopic, MODEL, SYSTEM_PROMPT } from "@/lib/llm-service";
 
 function uid() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-// Save user message immediately — before any streaming starts
-function saveUserMessage(sessionId: string, content: string): string {
-  const db = getDb();
-  const id = uid();
-  db.prepare(
-    "INSERT INTO chat_messages (id, session_id, role, content) VALUES (?, ?, 'user', ?)"
-  ).run(id, sessionId, content);
-  db.prepare(
-    "UPDATE chat_sessions SET updated_at = datetime('now') WHERE id = ?"
-  ).run(sessionId);
-  return id;
+async function saveUserMessage(sessionId: string, content: string) {
+  await sql`INSERT INTO chat_messages (id, session_id, role, content) VALUES (${uid()}, ${sessionId}, 'user', ${content})`;
+  await sql`UPDATE chat_sessions SET updated_at = NOW() WHERE id = ${sessionId}`;
 }
 
-// Save assistant message after streaming completes
-function saveAssistantMessage(
+async function saveAssistantMessage(
   sessionId: string,
   content: string,
-  sql: string,
+  sqlQuery: string,
   rowCount: number,
   isGuardrail: boolean
 ) {
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO chat_messages (id, session_id, role, content, sql, row_count, is_guardrail)
-     VALUES (?, ?, 'assistant', ?, ?, ?, ?)`
-  ).run(uid(), sessionId, content, sql || null, rowCount, isGuardrail ? 1 : 0);
-  db.prepare(
-    "UPDATE chat_sessions SET updated_at = datetime('now') WHERE id = ?"
-  ).run(sessionId);
+  await sql`
+    INSERT INTO chat_messages (id, session_id, role, content, sql, row_count, is_guardrail)
+    VALUES (${uid()}, ${sessionId}, 'assistant', ${content}, ${sqlQuery || null}, ${rowCount}, ${isGuardrail ? 1 : 0})
+  `;
+  await sql`UPDATE chat_sessions SET updated_at = NOW() WHERE id = ${sessionId}`;
 }
+
+const tryExecute = async (q: string): Promise<{ rows: Record<string, unknown>[]; error: string }> => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = await (sql as any)(q) as Record<string, unknown>[];
+    return { rows, error: "" };
+  } catch (e) {
+    return { rows: [], error: e instanceof Error ? e.message : String(e) };
+  }
+};
 
 export async function POST(req: Request) {
   const { messages, sessionId } = await req.json() as {
@@ -44,21 +42,17 @@ export async function POST(req: Request) {
   };
   const lastMessage = messages[messages.length - 1]?.content as string;
 
-  if (!lastMessage) {
-    return new Response("Missing message", { status: 400 });
-  }
+  if (!lastMessage) return new Response("Missing message", { status: 400 });
 
-  // Persist user message immediately so it's never lost
-  if (sessionId) saveUserMessage(sessionId, lastMessage);
+  if (sessionId) await saveUserMessage(sessionId, lastMessage);
 
-  // Guardrail — pass context flag so follow-ups are treated leniently
   const hasContext = messages.slice(0, -1).some((m) => m.role === "assistant");
   if (await isOffTopic(lastMessage, hasContext)) {
     const result = streamText({
       model: MODEL,
       prompt: "Reply with exactly: This system is designed to answer questions related to the Order-to-Cash dataset only.",
-      onFinish: ({ text }) => {
-        if (sessionId) saveAssistantMessage(sessionId, text, "", 0, true);
+      onFinish: async ({ text }) => {
+        if (sessionId) await saveAssistantMessage(sessionId, text, "", 0, true);
       },
     });
     return result.toTextStreamResponse({
@@ -67,28 +61,19 @@ export async function POST(req: Request) {
   }
 
   // Step 1 — generate + execute SQL (with self-heal on both errors AND 0 rows)
-  let sql = "";
+  let query = "";
   let results: Record<string, unknown>[] = [];
 
-  const tryExecute = (q: string): { rows: Record<string, unknown>[]; error: string } => {
-    try {
-      return { rows: getDb().prepare(q).all() as Record<string, unknown>[], error: "" };
-    } catch (e) {
-      return { rows: [], error: e instanceof Error ? e.message : String(e) };
-    }
-  };
-
   const history = messages.slice(0, -1);
-  sql = await generateSQL(lastMessage, history);
-  let attempt = tryExecute(sql);
+  query = await generateSQL(lastMessage, history);
+  let attempt = await tryExecute(query);
 
-  // Self-heal: retry if SQL errored OR returned 0 rows
   if (attempt.error || attempt.rows.length === 0) {
-    const fixedSql = await fixSQL(sql, lastMessage, attempt.error);
-    if (fixedSql !== sql) {
-      const fixedAttempt = tryExecute(fixedSql);
+    const fixedSql = await fixSQL(query, lastMessage, attempt.error);
+    if (fixedSql !== query) {
+      const fixedAttempt = await tryExecute(fixedSql);
       if (!fixedAttempt.error && fixedAttempt.rows.length >= attempt.rows.length) {
-        sql = fixedSql;
+        query = fixedSql;
         attempt = fixedAttempt;
       }
     }
@@ -114,22 +99,21 @@ The database returned 0 rows for this query.
 
 STRICT RULES:
 - Do NOT make up numbers, estimates, or assumptions.
-- State only what the data limitation is (e.g. "no records found", "this linkage is not available in the dataset").
-- Do not suggest what the answer "might be" or provide hypothetical figures.
+- State only what the data limitation is (e.g. "no records found").
 - Keep the response to 1-2 sentences.`;
 
   const result = streamText({
     model: MODEL,
     system: SYSTEM_PROMPT,
     prompt: answerPrompt,
-    onFinish: ({ text }) => {
-      if (sessionId) saveAssistantMessage(sessionId, text, sql, results.length, false);
+    onFinish: async ({ text }) => {
+      if (sessionId) await saveAssistantMessage(sessionId, text, query, results.length, false);
     },
   });
 
   return result.toTextStreamResponse({
     headers: {
-      "X-SQL": encodeURIComponent(sql),
+      "X-SQL": encodeURIComponent(query),
       "X-Row-Count": String(results.length),
       "X-SQL-Error": attempt.error,
     },

@@ -49,7 +49,7 @@ Do not explain. Do not add punctuation.`;
 }
 
 // ─── SQL System Prompt ────────────────────────────────────────────────────────
-const SQL_SYSTEM = `You are a SQLite expert for an SAP Order-to-Cash database.
+export const SQL_SYSTEM = `You are a PostgreSQL expert for an SAP Order-to-Cash database.
 Output ONLY a raw SQL SELECT statement — no markdown, no backticks, no explanation, no trailing semicolons.
 ALWAYS alias every table and prefix EVERY column with its alias to avoid ambiguous column errors.
 
@@ -178,7 +178,7 @@ sales_order_headers soh JOIN business_partners bp ON bp.businessPartner = soh.so
 
 -- Cancellation date range
 billing_document_cancellations bdc JOIN billing_document_headers bdh ON bdh.billingDocument = bdc.billingDocument
-  Date diff: CAST(julianday(bdc.creationDate) - julianday(bdh.billingDocumentDate) AS INTEGER)
+  Date diff: (bdc.creationdate::date - bdh.billingdocumentdate::date)
 
 ━━━ QUERY TEMPLATES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -228,7 +228,8 @@ WHERE bdh.billingDocumentIsCancelled = 0
 2. NEVER join on both referenceSdDocument AND referenceSdDocumentItem — always 0 rows.
 3. Use LEFT JOINs for any "show what exists" or trace query.
 4. NULL check after LEFT JOIN: use IS NULL on the JOIN KEY column only.
-5. Date arithmetic: use julianday() — e.g. CAST(julianday(a) - julianday(b) AS INTEGER).
+5. Date arithmetic: cast to date — e.g. (a::date - b::date) returns integer days in PostgreSQL.
+5a. Column names in PostgreSQL are lowercase (e.g. salesorder, billingdocument, soldtoparty).
 6. payments.invoiceReference is always NULL — payments cannot be linked to billing documents. Do NOT compute "outstanding receivables" by subtracting payment totals from billing totals — this is meaningless because: (a) 56 of 120 payment records have negative amounts (accounting reversals), and (b) payments are not linked to specific invoices. If asked about outstanding receivables or unpaid invoices, state clearly that this dataset does not contain the linkage needed to compute it accurately.
 7. Only SELECT statements. No INSERT, UPDATE, DELETE, DROP.
 8. Default LIMIT 100 unless the question asks for more.`;
