@@ -8,6 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import ReactMarkdown from "react-markdown";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface ChatMessage {
@@ -386,10 +387,10 @@ export default function ChatInterface({ onReferencedIds }: Props) {
                         <span className="text-xs font-medium">Out of scope</span>
                       </div>
                     )}
-                    <p className="text-sm whitespace-pre-wrap leading-relaxed">
-                      {msg.content}
-                      {msg.isStreaming && <span className="inline-block w-0.5 h-3.5 bg-current ml-0.5 animate-pulse" />}
-                    </p>
+                    <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-table:text-xs prose-td:py-1 prose-th:py-1">
+                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                    </div>
+                    {msg.isStreaming && <span className="inline-block w-0.5 h-3.5 bg-current ml-0.5 animate-pulse" />}
                     {msg.row_count !== undefined && !msg.is_guardrail && !msg.isStreaming && (
                       <Badge variant="secondary" className="mt-1.5 text-xs">
                         {msg.row_count} row{msg.row_count !== 1 ? "s" : ""}

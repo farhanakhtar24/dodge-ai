@@ -3,7 +3,23 @@ import { DEFAULT_MODEL } from "./models";
 
 export const MODEL = DEFAULT_MODEL;
 
-export const SYSTEM_PROMPT = `You are an expert data analyst for an SAP Order-to-Cash system. Answer questions using only data from the database. Be concise and data-driven. At the end of your answer include: {"referencedIds": ["id1","id2"]} listing any entity IDs from the results.`;
+export const SYSTEM_PROMPT = `You are an expert data analyst for an SAP Order-to-Cash system. Answer questions using only data from the database.
+
+Response style — two modes:
+
+DEFAULT (summary): Unless the user explicitly asks for a table, full list, or detailed breakdown, respond with:
+- A 2–4 bullet point summary of key findings using **bold** for important values.
+- Counts, totals, and notable patterns — not individual record details.
+- End with a short offer: "_Ask for the full table if you'd like row-level detail._"
+
+DETAILED (when asked): If the user asks to "show the data", "list all", "give me the table", "full breakdown", etc.:
+- Use a markdown table with clean column headers, OR bullet points if the user asks for them.
+- Show at most 20 rows. If there are more, end with "_Showing 20 of N — ask for more to continue._"
+- For a single record use a two-column (Field | Value) table.
+- Omit fields that are null/empty/not available.
+- Format dates as YYYY-MM-DD. Format amounts with commas and currency (e.g. 17,108.25 INR).
+
+At the end of your answer include: {"referencedIds": ["id1","id2"]} listing any entity IDs from the results.`;
 
 const OFF_TOPIC_REGEX = [
   /\bpoe[mt]/i, /\blyric/i, /\bsong\b/i,
@@ -12,20 +28,23 @@ const OFF_TOPIC_REGEX = [
   /\bweather/i, /\bsport/i, /\bmovie/i, /\bfilm\b/i, /\bcook/i, /\bjoke\b/i,
 ];
 
-export async function isOffTopic(message: string): Promise<boolean> {
-  // Fast path: obvious regex matches
+export async function isOffTopic(message: string, hasContext = false): Promise<boolean> {
+  // Fast path: obvious regex matches always block
   if (OFF_TOPIC_REGEX.some((p) => p.test(message))) return true;
 
-  // LLM classification for anything not caught by regex
-  const { text } = await generateText({
-    model: MODEL,
-    system: `You are a query classifier for an SAP Order-to-Cash business data system.
+  // LLM classification
+  const system = hasContext
+    ? `You are a query classifier for an SAP Order-to-Cash business data system.
+The user is in an ongoing conversation about business data (sales orders, deliveries, billing, payments, etc.).
+Short follow-up messages like "yes", "show me", "give me the table", "sure", or clarifying questions about prior results are ALWAYS relevant — reply YES.
+Only reply NO if the message is clearly unrelated to business data and is not a follow-up (e.g. write a poem, tell a joke, what is the weather).
+Reply with exactly one word — YES or NO. No punctuation.`
+    : `You are a query classifier for an SAP Order-to-Cash business data system.
 The system contains: sales orders, deliveries, billing documents, payments, journal entries, customers, products, and plants.
 Reply with exactly one word — YES if the user's question is relevant to this business dataset, NO if it is not.
-Do not explain. Do not add punctuation.`,
-    prompt: message,
-  });
+Do not explain. Do not add punctuation.`;
 
+  const { text } = await generateText({ model: MODEL, system, prompt: message });
   return text.trim().toUpperCase().startsWith("NO");
 }
 
@@ -224,11 +243,17 @@ function cleanSQL(raw: string): string {
     .trim();
 }
 
-export async function generateSQL(question: string): Promise<string> {
+export async function generateSQL(
+  question: string,
+  history: { role: string; content: string }[] = []
+): Promise<string> {
+  const contextBlock = history.length > 0
+    ? `Conversation so far:\n${history.map((m) => `${m.role}: ${m.content}`).join("\n")}\n\n`
+    : "";
   const { text } = await generateText({
     model: MODEL,
     system: SQL_SYSTEM,
-    prompt: `Generate a SQL SELECT query for: ${question}`,
+    prompt: `${contextBlock}Generate a SQL SELECT query for: ${question}`,
   });
   const sql = cleanSQL(text);
   if (!sql.toUpperCase().startsWith("SELECT")) {

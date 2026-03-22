@@ -1,6 +1,6 @@
 import { streamText } from "ai";
 import { getDb } from "@/lib/db";
-import { generateSQL, fixSQL, isOffTopic, MODEL } from "@/lib/llm-service";
+import { generateSQL, fixSQL, isOffTopic, MODEL, SYSTEM_PROMPT } from "@/lib/llm-service";
 
 function uid() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -51,8 +51,9 @@ export async function POST(req: Request) {
   // Persist user message immediately so it's never lost
   if (sessionId) saveUserMessage(sessionId, lastMessage);
 
-  // Guardrail
-  if (await isOffTopic(lastMessage)) {
+  // Guardrail — pass context flag so follow-ups are treated leniently
+  const hasContext = messages.slice(0, -1).some((m) => m.role === "assistant");
+  if (await isOffTopic(lastMessage, hasContext)) {
     const result = streamText({
       model: MODEL,
       prompt: "Reply with exactly: This system is designed to answer questions related to the Order-to-Cash dataset only.",
@@ -77,7 +78,8 @@ export async function POST(req: Request) {
     }
   };
 
-  sql = await generateSQL(lastMessage);
+  const history = messages.slice(0, -1);
+  sql = await generateSQL(lastMessage, history);
   let attempt = tryExecute(sql);
 
   // Self-heal: retry if SQL errored OR returned 0 rows
@@ -118,7 +120,7 @@ STRICT RULES:
 
   const result = streamText({
     model: MODEL,
-    system: "You are a data analyst for an SAP Order-to-Cash system. Summarise the database results in clear, natural language. Be concise and data-driven — highlight key numbers, patterns, or notable findings. Never estimate or infer anything not present in the data.",
+    system: SYSTEM_PROMPT,
     prompt: answerPrompt,
     onFinish: ({ text }) => {
       if (sessionId) saveAssistantMessage(sessionId, text, sql, results.length, false);
