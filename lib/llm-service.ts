@@ -1,33 +1,13 @@
-import { createGroq } from "@ai-sdk/groq";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { generateText } from "ai";
-import { SCHEMA_FOR_LLM } from "./schema";
 
-const groq = createGroq({
-  apiKey: process.env.GROQ_API_KEY,
+const google = createGoogleGenerativeAI({
+  apiKey: process.env.GEMINI_API_KEY,
 });
 
-export const MODEL = groq("llama-3.3-70b-versatile");
+export const MODEL = google("gemini-3-flash-preview");
 
-export const SYSTEM_PROMPT = `You are an expert data analyst for an SAP Order-to-Cash system.
-You have access to a SQLite database with the following schema:
-
-${SCHEMA_FOR_LLM}
-
-RULES:
-- Only generate SELECT statements. Never INSERT, UPDATE, DELETE, or DROP.
-- Use valid SQLite syntax only.
-- Limit results to 100 rows unless the user specifies otherwise.
-- Use proper JOINs based on the key relationships defined in the schema.
-- Be concise and data-driven in your answers.
-- At the end of your answer, include a JSON object listing any specific entity IDs mentioned in results: {"referencedIds": ["id1", "id2"]}
-
-DOMAIN HINTS:
-- Full O2C trace: billing_document_headers → billing_document_items → outbound_delivery_headers (referenceSdDocument) → sales_order_headers → payments (invoiceReference)
-- Unbilled deliveries: outbound_delivery_headers LEFT JOIN billing_document_items ON deliveryDocument = referenceSdDocument WHERE billing side IS NULL
-- Unpaid invoices: billing_document_headers LEFT JOIN payments ON billingDocument = invoiceReference WHERE payments side IS NULL
-- Products with most billing docs: JOIN billing_document_items with products on material = product, GROUP BY product
-
-This system is ONLY for Order-to-Cash data analysis. Reject unrelated queries politely.`;
+export const SYSTEM_PROMPT = `You are an expert data analyst for an SAP Order-to-Cash system. Answer questions using only data from the database. Be concise and data-driven. At the end of your answer include: {"referencedIds": ["id1","id2"]} listing any entity IDs from the results.`;
 
 const OFF_TOPIC = [
   /\bpoe[mt]/i, /\blyric/i, /\bsong\b/i,
@@ -40,49 +20,190 @@ export function isOffTopic(message: string): boolean {
   return OFF_TOPIC.some((p) => p.test(message));
 }
 
-const SQL_SYSTEM = `You are a SQLite expert for an SAP Order-to-Cash database. Output ONLY a raw SQL SELECT statement — no markdown, no backticks, no explanation, no trailing semicolons.
+// ─── SQL System Prompt ────────────────────────────────────────────────────────
+const SQL_SYSTEM = `You are a SQLite expert for an SAP Order-to-Cash database.
+Output ONLY a raw SQL SELECT statement — no markdown, no backticks, no explanation, no trailing semicolons.
+ALWAYS alias every table and prefix EVERY column with its alias to avoid ambiguous column errors.
 
-${SCHEMA_FOR_LLM}
+━━━ TABLES & COLUMNS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-VERIFIED WORKING JOIN CONDITIONS (use EXACTLY these — others return 0 rows):
-- Products in billing docs:     billing_document_items b JOIN products p ON b.material = p.product
-- Billing docs for a delivery:  billing_document_items b JOIN outbound_delivery_headers d ON b.referenceSdDocument = d.deliveryDocument
-- Delivery for a sales order:   outbound_delivery_items d JOIN sales_order_headers s ON d.referenceSdDocument = s.salesOrder  (single key only — do NOT add item-level condition)
-- Payment for a billing doc:    payments p JOIN billing_document_headers b ON p.invoiceReference = b.billingDocument
-- Journal for a billing doc:    journal_entry_items j JOIN billing_document_headers b ON j.referenceDocument = b.billingDocument
-- Customer for a sales order:   sales_order_headers s JOIN business_partners bp ON s.soldToParty = bp.businessPartner
+sales_order_headers (alias: soh)
+  PK: salesOrder
+  Columns: salesOrderType, salesOrganization, distributionChannel, soldToParty,
+           totalNetAmount, transactionCurrency, overallDeliveryStatus,
+           overallOrdReltdBillgStatus, creationDate, requestedDeliveryDate,
+           headerBillingBlockReason, deliveryBlockReason, customerPaymentTerms
+  Status codes: overallDeliveryStatus = 'C' (delivered), '' (not delivered)
+                overallOrdReltdBillgStatus = 'C' (billed), '' (not billed)
 
-TRACE QUERY TEMPLATE — use this EXACT pattern when asked to trace a billing document:
-SELECT
-  bdh.billingDocument,
-  bdh.billingDocumentDate,
-  bdh.totalNetAmount        AS billingAmount,
-  bdh.transactionCurrency,
-  bdi.material,
-  odh.deliveryDocument,
-  odh.actualGoodsMovementDate,
-  odi.referenceSdDocument   AS salesOrder,
-  soh.salesOrderType,
-  soh.soldToParty,
-  soh.totalNetAmount        AS orderAmount,
-  p.amountInTransactionCurrency AS paymentAmount,
-  p.clearingDate,
-  j.accountingDocument,
-  j.postingDate
+sales_order_items (alias: soi)
+  PK: salesOrder + salesOrderItem
+  Columns: salesOrder, salesOrderItem, material, requestedQuantity,
+           requestedQuantityUnit, netAmount, transactionCurrency,
+           productionPlant, storageLocation
+
+outbound_delivery_headers (alias: odh)
+  PK: deliveryDocument
+  Columns: deliveryDocument, creationDate, actualGoodsMovementDate,
+           overallGoodsMovementStatus, overallPickingStatus, shippingPoint,
+           deliveryBlockReason, headerBillingBlockReason
+
+outbound_delivery_items (alias: odi)
+  PK: deliveryDocument + deliveryDocumentItem
+  Columns: deliveryDocument, deliveryDocumentItem, actualDeliveryQuantity,
+           deliveryQuantityUnit, plant, storageLocation,
+           referenceSdDocument, referenceSdDocumentItem
+  ⚠️  referenceSdDocument = the sales order number
+
+billing_document_headers (alias: bdh)
+  PK: billingDocument
+  Columns: billingDocument, billingDocumentType, billingDocumentDate,
+           creationDate, totalNetAmount, transactionCurrency, companyCode,
+           fiscalYear, accountingDocument, soldToParty,
+           billingDocumentIsCancelled (INTEGER: 1=cancelled, 0=active),
+           cancelledBillingDocument
+  ⚠️  cancelledBillingDocument is always empty string — no re-billing data exists
+
+billing_document_items (alias: bdi)
+  PK: billingDocument + billingDocumentItem
+  Columns: billingDocument, billingDocumentItem, material, billingQuantity,
+           billingQuantityUnit, netAmount, transactionCurrency,
+           referenceSdDocument, referenceSdDocumentItem
+  ⚠️  referenceSdDocument = the delivery document number
+
+billing_document_cancellations (alias: bdc)
+  PK: billingDocument
+  Columns: billingDocument, billingDocumentType, creationDate (= cancellation date),
+           billingDocumentIsCancelled, cancelledBillingDocument, totalNetAmount,
+           transactionCurrency, companyCode, fiscalYear, accountingDocument, soldToParty
+  ⚠️  Does NOT have billingDocumentDate — use creationDate for the cancellation date
+
+journal_entry_items (alias: j)
+  PK: accountingDocument + accountingDocumentItem
+  Columns: companyCode, fiscalYear, accountingDocument, accountingDocumentItem,
+           glAccount, referenceDocument, amountInTransactionCurrency,
+           transactionCurrency, companyCodeCurrency, amountInCompanyCodeCurrency,
+           postingDate, documentDate, accountingDocumentType, customer
+
+payments (alias: p)
+  PK: accountingDocument + accountingDocumentItem
+  Columns: companyCode, fiscalYear, accountingDocument, accountingDocumentItem,
+           clearingDate, amountInTransactionCurrency, transactionCurrency,
+           companyCodeCurrency, amountInCompanyCodeCurrency, customer,
+           invoiceReference, invoiceReferenceFiscalYear, salesDocument,
+           postingDate, documentDate, glAccount
+  ⚠️  invoiceReference is NULL for ALL records — payments cannot be linked to
+      billing documents in this dataset. Do not attempt payment-to-billing joins.
+
+business_partners (alias: bp)
+  PK: businessPartner
+  Columns: businessPartner, customer, businessPartnerFullName,
+           businessPartnerCategory, businessPartnerName, creationDate,
+           businessPartnerIsBlocked (BOOLEAN), isMarkedForArchiving (BOOLEAN)
+
+business_partner_addresses (alias: bpa)
+  PK: businessPartner + addressId
+  Columns: businessPartner, addressId, cityName, country, postalCode,
+           streetName, region, addressTimeZone
+
+products (alias: prod)
+  PK: product
+  Columns: product, productType, grossWeight, netWeight, weightUnit,
+           baseUnit, productGroup, isMarkedForDeletion (BOOLEAN), creationDate
+
+product_descriptions (alias: pd)
+  PK: product + language
+  Columns: product, language, productDescription
+
+plants (alias: pl)
+  PK: plant
+  Columns: plant, plantName, salesOrganization, distributionChannel,
+           addressId, plantCategory
+
+product_plants (alias: pp)
+  PK: product + plant
+  Columns: product, plant, countryOfOrigin, profitCenter, mrpType
+
+━━━ VERIFIED JOIN PATHS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+-- Sales order → delivery
+outbound_delivery_items odi ON odi.referenceSdDocument = soh.salesOrder
+⚠️  Single key ONLY — never add referenceSdDocumentItem condition (always returns 0)
+
+-- Delivery → billing
+billing_document_items bdi ON bdi.referenceSdDocument = odi.deliveryDocument
+
+-- Billing item → billing header
+billing_document_headers bdh ON bdh.billingDocument = bdi.billingDocument
+
+-- Billing → journal entry
+journal_entry_items j ON j.referenceDocument = bdh.billingDocument
+
+-- Products in billing
+billing_document_items bdi JOIN products prod ON prod.product = bdi.material
+
+-- Products with descriptions
+products prod JOIN product_descriptions pd ON pd.product = prod.product AND pd.language = 'EN'
+
+-- Customer for sales order
+sales_order_headers soh JOIN business_partners bp ON bp.businessPartner = soh.soldToParty
+
+-- Cancellation date range
+billing_document_cancellations bdc JOIN billing_document_headers bdh ON bdh.billingDocument = bdc.billingDocument
+  Date diff: CAST(julianday(bdc.creationDate) - julianday(bdh.billingDocumentDate) AS INTEGER)
+
+━━━ QUERY TEMPLATES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+-- TRACE full O2C flow for a billing document (always LEFT JOIN):
+SELECT bdh.billingDocument, bdh.billingDocumentDate, bdh.totalNetAmount,
+       bdh.transactionCurrency, bdi.material,
+       odh.deliveryDocument, odh.actualGoodsMovementDate,
+       odi.referenceSdDocument AS salesOrder,
+       soh.salesOrderType, soh.soldToParty, soh.totalNetAmount AS orderAmount,
+       j.accountingDocument, j.postingDate
 FROM billing_document_headers bdh
-LEFT JOIN billing_document_items bdi ON bdh.billingDocument = bdi.billingDocument
-LEFT JOIN outbound_delivery_headers odh ON bdi.referenceSdDocument = odh.deliveryDocument
-LEFT JOIN outbound_delivery_items odi ON odh.deliveryDocument = odi.deliveryDocument
-LEFT JOIN sales_order_headers soh ON odi.referenceSdDocument = soh.salesOrder
-LEFT JOIN payments p ON bdh.billingDocument = p.invoiceReference
-LEFT JOIN journal_entry_items j ON bdh.billingDocument = j.referenceDocument
+LEFT JOIN billing_document_items bdi ON bdi.billingDocument = bdh.billingDocument
+LEFT JOIN outbound_delivery_headers odh ON odh.deliveryDocument = bdi.referenceSdDocument
+LEFT JOIN outbound_delivery_items odi ON odi.deliveryDocument = odh.deliveryDocument
+LEFT JOIN sales_order_headers soh ON soh.salesOrder = odi.referenceSdDocument
+LEFT JOIN journal_entry_items j ON j.referenceDocument = bdh.billingDocument
 WHERE bdh.billingDocument = '[ID]'
 
-RULES:
-- NEVER join on both referenceSdDocument AND referenceSdDocumentItem together — it always returns 0 rows
-- For trace queries ALWAYS use LEFT JOINs (never INNER JOIN) so partial flows still return rows
-- Always use the most direct join path. Do not chain through intermediate tables unless tracing the full O2C flow
-- Use COUNT(), GROUP BY, ORDER BY, LIMIT appropriately`;
+-- BILLING DOCS for a sales order (always LEFT JOIN):
+SELECT soh.salesOrder, soh.overallDeliveryStatus, soh.overallOrdReltdBillgStatus,
+       odi.deliveryDocument, bdh.billingDocument, bdh.billingDocumentDate,
+       bdh.totalNetAmount, bdh.transactionCurrency
+FROM sales_order_headers soh
+LEFT JOIN outbound_delivery_items odi ON odi.referenceSdDocument = soh.salesOrder
+LEFT JOIN billing_document_items bdi ON bdi.referenceSdDocument = odi.deliveryDocument
+LEFT JOIN billing_document_headers bdh ON bdh.billingDocument = bdi.billingDocument
+WHERE soh.salesOrder = '[ID]'
+
+-- UNDELIVERED sales orders:
+SELECT soh.salesOrder, soh.totalNetAmount, soh.transactionCurrency, soh.creationDate
+FROM sales_order_headers soh
+LEFT JOIN outbound_delivery_items odi ON odi.referenceSdDocument = soh.salesOrder
+WHERE odi.referenceSdDocument IS NULL
+
+-- UNBILLED deliveries (delivered but no billing doc):
+SELECT odh.deliveryDocument, odh.actualGoodsMovementDate
+FROM outbound_delivery_headers odh
+LEFT JOIN billing_document_items bdi ON bdi.referenceSdDocument = odh.deliveryDocument
+WHERE bdi.referenceSdDocument IS NULL
+
+-- ACTIVE (non-cancelled) billing documents:
+WHERE bdh.billingDocumentIsCancelled = 0
+
+━━━ RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. ALWAYS alias every table. ALWAYS prefix every column with its alias.
+2. NEVER join on both referenceSdDocument AND referenceSdDocumentItem — always 0 rows.
+3. Use LEFT JOINs for any "show what exists" or trace query.
+4. NULL check after LEFT JOIN: use IS NULL on the JOIN KEY column only.
+5. Date arithmetic: use julianday() — e.g. CAST(julianday(a) - julianday(b) AS INTEGER).
+6. payments.invoiceReference is always NULL — payments cannot be linked to billing documents. Do NOT compute "outstanding receivables" by subtracting payment totals from billing totals — this is meaningless because: (a) 56 of 120 payment records have negative amounts (accounting reversals), and (b) payments are not linked to specific invoices. If asked about outstanding receivables or unpaid invoices, state clearly that this dataset does not contain the linkage needed to compute it accurately.
+7. Only SELECT statements. No INSERT, UPDATE, DELETE, DROP.
+8. Default LIMIT 100 unless the question asks for more.`;
 
 function cleanSQL(raw: string): string {
   return raw
@@ -107,14 +228,23 @@ export async function generateSQL(question: string): Promise<string> {
   return sql;
 }
 
-export async function fixSQL(originalSQL: string, question: string): Promise<string> {
+export async function fixSQL(originalSQL: string, question: string, error = ""): Promise<string> {
+  const issue = error
+    ? `This SQL threw an error: ${error}`
+    : `This SQL returned 0 rows`;
+
   const { text } = await generateText({
     model: MODEL,
     system: SQL_SYSTEM,
-    prompt: `This SQL returned 0 rows for the question "${question}":
+    prompt: `${issue} for the question "${question}":
 ${originalSQL}
 
-The query may be using wrong join paths or wrong column names. Rewrite it using the PREFERRED JOIN PATHS above. Output ONLY the corrected raw SQL SELECT statement.`,
+Fix it. Common causes:
+- Missing table alias prefix on a column (ambiguous column error)
+- Wrong join key (use ONLY the verified join paths above)
+- NULL check on wrong column after LEFT JOIN (must check IS NULL on the join key)
+- payments.invoiceReference is always NULL — remove any payment-to-billing join
+Output ONLY the corrected raw SQL SELECT statement.`,
   });
   return cleanSQL(text);
 }
